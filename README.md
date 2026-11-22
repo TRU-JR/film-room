@@ -37,7 +37,7 @@ The app runs on Streamlit Community Cloud, so anyone with the link can use it in
   about a minute, so open it a few minutes before a demo.
 - Rosters live in your browser tab. Select **Download roster file** to keep one, and use **Open roster files**
   to load it again later.
-- **Download latest data** in the sidebar refreshes the stats for everyone using the app.
+- **Download latest data** on the Settings page refreshes the stats for everyone using the app.
 
 ## Run it on your own computer (optional)
 
@@ -56,15 +56,20 @@ and works offline.
 
 | Page | What it does | Req. |
 |---|---|---|
-| Explore | Sidebar filters (season range, position, minimum games, age range, active only); chart builder with scatter, histogram, box-and-whisker and line charts, user-chosen axes, grouping, and linear / polynomial / exponential trendlines with R²; summary table of averages by position, team, age range or season | R4–R6, R10, R11 |
+| Explore | Filters set on the Settings page (season range, position, minimum games, age range, active only); chart builder with scatter, histogram, box-and-whisker and line charts, user-chosen axes, grouping, and linear / polynomial / exponential trendlines with R²; summary table of averages by position, team, age range or season | R4–R6, R10, R11 |
 | Players | Career and per-season tables, per-game table, current-season game log, trend chart with projection and likely range, rules-based scouting notes | R7, R12–R14 |
 | Compare | Up to six players from one position on any stat, season by season | R8 |
 | Teams | Offense and defense unit rankings, head-to-head comparison, fantasy points allowed by position, D/ST fantasy points | R9 |
 | Projections | 2026 projections (regression, rookie x 1.10 rule), growth flag, blend with the 2026 season so far, and a 2025 backtest showing accuracy | R12–R14, implicit 4 |
 | Roster | QB / RB / WR / TE / FLEX / D/ST / bench slots, season or single-game projections with opponent matchup factors, multiple rosters, download and open roster files (JSON) | R16, R17 |
-| Search | Plain-English, rules-based search, e.g. "WRs under 25 with 100+ targets last season", with an automatically chosen chart | R18 |
+| Search | Plain-English, rules-based search, e.g. "WRs under 25 with 100+ targets last season", with an automatically chosen chart and a step-by-step guide to what it understands | R18 |
+| Settings | Scoring format, Explore filters, data download | R15 |
 
-The scoring format (PPR, half-PPR, standard) in the sidebar updates every page (R15).
+The scoring format (PPR, half-PPR, standard) on the Settings page updates every page (R15).
+
+**Injuries:** a 🔴 next to a player's name means he's hurt right now (out, doubtful, or on IR / PUP / NFI);
+🟠 means questionable. It comes from the latest nflverse injury report and weekly roster. On a player's page,
+a ✚ over a season's bar and a note in the season table mark past seasons an injury kept him out of games.
 
 ## Code layout
 
@@ -78,6 +83,7 @@ fantasy/
   player.py            Player          - one player's career
   projector.py         Projector       - regression projections, rookie rule, growth flag, backtest
   query.py             DataQuery       - filters, summaries, rules-based search parser
+  injuries.py          Injury          - who is hurt now, and seasons an injury cost a player
   comparison.py        Comparison      - players (max 6, same position) and team units
   plots.py             PlotBuilder     - Plotly charts and trendline fitting
   roster.py            Roster          - lineup slots, projections, JSON save/load
