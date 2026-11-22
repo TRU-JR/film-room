@@ -44,9 +44,8 @@ header[data-testid="stHeader"] [aria-current="page"] span, header[data-testid="s
 header[data-testid="stHeader"] [aria-current="page"] { box-shadow: inset 0 -3px 0 var(--gold); border-radius: 0 !important; }
 header[data-testid="stHeader"] button svg { fill: #dfe6f0; color: #dfe6f0; }
 
-/* sidebar = sideline */
-section[data-testid="stSidebar"] { background: #ffffff; border-right: 1px solid var(--line); min-width: 320px !important; }
-section[data-testid="stSidebar"] h2 { font-size: 1.35rem !important; margin: 0 !important; }
+/* no sidebar: settings live on their own page */
+section[data-testid="stSidebar"], [data-testid="stSidebarCollapsedControl"] { display: none !important; }
 
 /* field-style hero: yard lines with a gold first-down line */
 .fr-hero { position: relative; overflow: hidden; border-radius: 14px; margin: 0 0 1.4rem 0;
