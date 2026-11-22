@@ -1,7 +1,7 @@
 """Film Room: NFL fantasy analytics (Streamlit).
 
 Run with:  streamlit run app.py
-Pages: explore(), player_page(), compare(), teams(), projections(), roster(), search()
+Pages: explore(), player_page(), compare(), teams(), projections(), roster(), search(), settings()
 Session state: current roster, scoring format, filters.
 """
 from __future__ import annotations
@@ -17,8 +17,8 @@ import streamlit as st
 from matplotlib.colors import LinearSegmentedColormap
 
 import ui
-from fantasy import (Comparison, DataLoader, DataQuery, FantasyError, PlotBuilder, Player,
-                     Projector, Roster, ScoringFormat, StatProcessor)
+from fantasy import (Comparison, DataLoader, DataQuery, FantasyError, Injury, PlotBuilder, Player,
+                     Projector, Roster, ScoringFormat, StatProcessor, current_injuries, season_injuries)
 from fantasy.player import build_players
 from fantasy.plots import (CHART_TYPES, INK, POSITION_COLORS, SERIES, TRENDLINES, apply_theme)
 from fantasy.query import GROUPABLE, STAT_LABELS, label
@@ -39,7 +39,7 @@ CHART_STATS = ["fpts", "fpts_pg", "age", "games", "targets", "targets_pg", "rece
 BLUE_SCALE = LinearSegmentedColormap.from_list("fr_blue", ["#ffffff", "#9ec5f4", "#3987e5"])
 
 st.set_page_config(page_title="Film Room", page_icon="🏈", layout="wide",
-                   initial_sidebar_state="expanded")
+                   initial_sidebar_state="collapsed")
 ui.inject_css()
 
 
@@ -66,6 +66,9 @@ class World:
     last_week: int
     remaining: dict[str, int] = field(default_factory=dict)
     schedule: pd.DataFrame = field(default_factory=pd.DataFrame)
+    injuries: pd.DataFrame = field(default_factory=pd.DataFrame)   # one row per player per week hurt
+    injured: dict[str, Injury] = field(default_factory=dict)       # hurt right now, keyed by player id
+    injury_week: int | None = None                                 # latest week with injury data
 
 
 @st.cache_resource(show_spinner="Scoring every season and building projections…")
@@ -85,6 +88,10 @@ def build_world(scoring_name: str) -> World:
 
     players = build_players(seasons, team_now)
     players.update(build_players(dst))
+    injured = current_injuries(loader.injuries, CURRENT_SEASON)
+    for pid, inj in injured.items():
+        if pid in players:
+            players[pid].injury = inj
     proj = Projector(target_season=CURRENT_SEASON)
     table = proj.projection_table(list(players.values()))
 
@@ -105,11 +112,15 @@ def build_world(scoring_name: str) -> World:
     table["blended"] = (table["cur_fpts"] + table["rate"] * table["remaining"]).round(1)
     table["active"] = table["player_id"].isin(team_now) | (table["position"] == "DST")
     table["label"] = table["name"] + " (" + table["position"].replace("DST", "D/ST") + ", " + table["team"] + ")"
+    table["status"] = table["player_id"].map(lambda i: f"{injured[i].dot} {injured[i].text}" if i in injured else "")
 
     backtest = proj.backtest(seasons, CURRENT_SEASON - 1)
+    inj = loader.injuries
+    cur_inj = inj[inj["season"] == CURRENT_SEASON] if len(inj) else inj
     return World(scoring, seasons, dst, weeks, tg, players, table, backtest,
                  matchup_factors(weeks, CURRENT_SEASON), team_offense_points_factor(tg, CURRENT_SEASON),
-                 last_week, remaining, sched)
+                 last_week, remaining, sched, inj, injured,
+                 int(cur_inj["week"].max()) if len(cur_inj) else None)
 
 
 def opponent(world: World, team: str, week: int) -> str | None:
@@ -152,20 +163,40 @@ def init_state() -> None:
     ss.setdefault("search_box", ss["search_text"])
 
 
-def sidebar(world: World) -> None:
+def settings() -> None:
+    """Scoring format, Explore filters and data refresh (these used to live in a sidebar)."""
+    world = build_world(st.session_state["scoring"])
     ss = st.session_state
-    with st.sidebar:
-        st.markdown("## Film Room")
-        ui.note(f"nflverse data, {world.seasons['season'].min()}–{CURRENT_SEASON}. "
-                f"{CURRENT_SEASON} is complete through week {world.last_week}.")
-        choice = st.segmented_control("Scoring format", ScoringFormat.all_formats(),
-                                      default=ss["scoring"], key="scoring_ctl")
-        if choice and choice != ss["scoring"]:
-            ss["scoring"] = choice
-            ss["roster"].scoring = ScoringFormat(choice)
-            st.rerun()
-        st.divider()
-        st.markdown("**Filters**")
+    ui.hero("Settings", "Choose the scoring format for every page, set the filters the Explore page uses, "
+            "and download the latest data.")
+    left, right = st.columns([1, 1])
+    with left:
+        with st.container(border=True, key="card_s1"):
+            st.markdown("### Scoring format")
+            choice = st.segmented_control("Scoring format", ScoringFormat.all_formats(), default=ss["scoring"],
+                                          key="scoring_ctl", label_visibility="collapsed")
+            ui.note("Changes the fantasy points on every page, including your rosters.")
+            if choice and choice != ss["scoring"]:
+                ss["scoring"] = choice
+                ss["roster"].scoring = ScoringFormat(choice)
+                st.rerun()
+        with st.container(border=True, key="card_s2"):
+            st.markdown("### Data")
+            inj = (f" Injury status is from the week {world.injury_week} injury report and roster."
+                   if world.injury_week else " Injury data couldn't be downloaded, so no injury markers are shown.")
+            ui.note(f"nflverse data, {world.seasons['season'].min()}–{CURRENT_SEASON}. "
+                    f"{CURRENT_SEASON} is complete through week {world.last_week}.{inj}")
+            if st.button("Download latest data", help="Re-downloads every file from nflverse (about a minute)."):
+                try:
+                    with st.spinner("Downloading from nflverse…"):
+                        get_loader().refresh()
+                    st.cache_resource.clear()
+                    st.rerun()
+                except Exception as exc:  # network / format problems
+                    st.error(f"The download failed, so the app is still using the cached data. Details: {exc}")
+    with right, st.container(border=True, key="card_s3"):
+        st.markdown("### Explore filters")
+        ui.note("These decide which player-seasons the Explore page charts and ranks.")
         f = ss["filters"]
         f["seasons"] = st.slider("Seasons", 2021, CURRENT_SEASON, f["seasons"],
                                  help=f"{CURRENT_SEASON} only has games through week {world.last_week}.")
@@ -174,15 +205,6 @@ def sidebar(world: World) -> None:
         f["age"] = st.slider("Age range", 20, 40, f["age"])
         f["active_only"] = st.toggle("Active players only", f["active_only"],
                                      help=f"Only players on a {CURRENT_SEASON} active roster.")
-        st.divider()
-        if st.button("Download latest data", help="Re-downloads every file from nflverse (about 30 seconds)."):
-            try:
-                with st.spinner("Downloading from nflverse…"):
-                    get_loader().refresh()
-                st.cache_resource.clear()
-                st.rerun()
-            except Exception as exc:  # network / format problems
-                st.error(f"The download failed, so the app is still using the cached data. Details: {exc}")
 
 
 def filtered(world: World) -> pd.DataFrame:
@@ -196,9 +218,12 @@ def filtered(world: World) -> pd.DataFrame:
 
 
 def show_table(df: pd.DataFrame, cols: list[str], height: int | None = None, key: str | None = None,
-               select: bool = False, rename: dict | None = None):
+               select: bool = False, rename: dict | None = None, injured: dict[str, Injury] | None = None):
     cols = [c for c in cols if c in df]
     view = df[cols].copy()
+    if injured and "name" in view and "player_id" in df:
+        dots = df["player_id"].map(lambda i: injured[i].dot + " " if i in injured else "")
+        view["name"] = dots + view["name"]
     names = {c: (rename or {}).get(c, STAT_LABELS.get(c, label(c))) for c in cols}
     names.update({"name": "Player", "position": "Pos", "team": "Team", "current_team": "Team"})
     config = {}
@@ -222,6 +247,12 @@ def fmt(v: float, digits: int = 1) -> str:
     return "–" if v is None or (isinstance(v, float) and math.isnan(v)) else f"{v:,.{digits}f}"
 
 
+def injury_legend(world: World) -> None:
+    if world.injured:
+        ui.note(f"🔴 hurt now: out, doubtful or on injured reserve.  🟠 questionable. "
+                f"From the week {world.injury_week} injury report.")
+
+
 def open_player(pid: str) -> None:
     st.session_state["player_id"] = pid
     st.switch_page(PAGES["player"])
@@ -236,6 +267,11 @@ def explore() -> None:
             "Filter every player-season, chart any two stats against each other, and see averages "
             "for the groups you care about.", kicker=f"{world.scoring.name} scoring")
     lo, hi = f["seasons"]
+    c1, c2 = st.columns([5, 1], vertical_alignment="center")
+    c1.markdown(f'<p class="fr-note">Filters: {lo}–{hi} · {", ".join(f["positions"])} · {f["min_games"]}+ games · '
+                f'age {f["age"][0]}–{f["age"][1]}{" · active only" if f["active_only"] else ""}</p>',
+                unsafe_allow_html=True)
+    c2.page_link(PAGES["settings"], label="Change filters", icon=":material/tune:")
     ui.board([
         (f"{len(df):,}", "Player-seasons in view", f"{lo}–{hi}" if lo != hi else str(lo)),
         (f"{df['player_id'].nunique():,}", "Players", ", ".join(f["positions"])),
@@ -243,7 +279,7 @@ def explore() -> None:
         (fmt(df["age"].mean()), "Average age", f"{f['age'][0]}–{f['age'][1]}"),
     ])
     if df.empty:
-        st.info("No player-seasons match these filters. Widen the season range or lower the minimum games in the sidebar.")
+        st.info("No player-seasons match these filters. Widen the season range or lower the minimum games in Settings.")
         return
 
     with st.container(border=True, key="card_1"):
@@ -283,8 +319,9 @@ def explore() -> None:
         sort = st.selectbox("Rank by", CHART_STATS[:-1], format_func=label, key="top_sort")
         top = df.sort_values(sort, ascending=False).head(60)
         ev = show_table(top, ["name", "position", "season", "team", "age", "games", sort, "fpts_pg"],
-                        height=360, key="top_table", select=True)
+                        height=360, key="top_table", select=True, injured=world.injured)
         ui.note("Select a row to open that player's page.")
+        injury_legend(world)
         if ev and ev.selection.rows:
             open_player(top.iloc[ev.selection.rows[0]]["player_id"])
 
@@ -320,6 +357,8 @@ def player_page() -> None:
         flags.append((f"Growing: +{r['slope']:.1f} pts/game per season", "good"))
     elif r is not None and r["slope"] < -0.5:
         flags.append((f"Declining: {r['slope']:.1f} pts/game per season", "bad"))
+    if p.injury is not None:
+        flags.insert(0, (f"{p.injury.dot} {p.injury.text}, week {p.injury.week}", "bad"))
     if r is not None:
         flags.append((f"Projection method: {r['method']}", ""))
     ui.player_header(p.name, p.position, TEAM_NAMES.get(p.team, p.team), facts, flags)
@@ -333,10 +372,18 @@ def player_page() -> None:
             (fmt(r["blended"], 0), f"{CURRENT_SEASON} full-season outlook",
              f"actual + {int(r['remaining'])} games at {fmt(r['rate'])}"),
         ])
+    if p.injury is not None and p.injury.likely_out and r is not None:
+        st.warning(f"{p.name} is currently listed as {p.injury.text.lower()}. The {CURRENT_SEASON} outlook assumes he "
+                   "plays every remaining game, so lower it for the games he misses.", icon=":material/healing:")
+    hurt = season_injuries(world.injuries, pid)
     left, right = st.columns([1.5, 1])
     with left, st.container(border=True, key="card_4"):
         st.markdown("### Points per game by season")
-        st.plotly_chart(_trend_figure(p, proj, r), width="stretch", config={"displaylogo": False})
+        st.plotly_chart(_trend_figure(p, proj, r, hurt), width="stretch", config={"displaylogo": False})
+        if len(hurt):
+            ui.chips([f"{int(h.season)}{' so far' if h.season == CURRENT_SEASON else ''}: {h.note}"
+                      for h in hurt.itertuples()], kind="bad")
+            ui.note("✚ above a bar marks a season an injury kept him out of games.")
     with right, st.container(border=True, key="card_5"):
         st.markdown("### Scouting notes")
         notes = scouting_notes(p, world.seasons, proj, CURRENT_SEASON, world.scoring.name)
@@ -360,8 +407,11 @@ def player_page() -> None:
                      "target_share", "catch_rate", "carries", "rushing_yards"],
               "TE": ["targets", "receptions", "receiving_yards", "receiving_tds", "yards_per_target",
                      "target_share", "catch_rate"]}[p.position]
+    seasons_view = p.seasons.merge(hurt[["season", "note"]], on="season", how="left") if len(hurt) else p.seasons
+    if len(hurt):
+        seasons_view["injury_note"] = seasons_view["note"].fillna("")
     with tabs[0]:
-        show_table(p.seasons, base + by_pos)
+        show_table(seasons_view, base + by_pos + ["injury_note"], rename={"injury_note": "Injury"})
     with tabs[1]:
         show_table(p.seasons, ["season", "games"] + [c for c in p.seasons.columns if c.endswith("_pg")])
     with tabs[2]:
@@ -376,7 +426,7 @@ def player_page() -> None:
         show_table(totals.to_frame().T, [c for c in ["games", "fpts", "fpts_pg"] + by_pos if c in totals])
 
 
-def _trend_figure(p: Player, proj: Projector, r) -> go.Figure:
+def _trend_figure(p: Player, proj: Projector, r, hurt: pd.DataFrame | None = None) -> go.Figure:
     s = p.seasons
     done = s[~s["partial"].astype(bool)]
     cur = s[s["partial"].astype(bool)]
@@ -406,6 +456,12 @@ def _trend_figure(p: Player, proj: Projector, r) -> go.Figure:
                                  error_y=dict(type="data", symmetric=False, array=[hi - r["proj_pg"]],
                                               arrayminus=[r["proj_pg"] - lo], color=INK, thickness=1.5, width=8),
                                  hovertemplate=f"Projected {CURRENT_SEASON}: %{{y:.1f}} pts/game<br>Range {lo:.1f}–{hi:.1f}<extra></extra>"))
+    if hurt is not None and len(hurt):
+        marks = s.merge(hurt, on="season")
+        fig.add_trace(go.Scatter(x=marks["season"], y=marks["fpts_pg"], mode="text", text=["✚"] * len(marks),
+                                 textposition="top center", textfont=dict(color="#b42318", size=16),
+                                 name="Injured that season", customdata=marks["note"],
+                                 hovertemplate="%{x}: %{customdata}<extra></extra>"))
     fig.update_layout(barmode="overlay", xaxis_title="", yaxis_title="Fantasy points per game")
     fig.update_xaxes(dtick=1)
     return apply_theme(fig, height=380)
@@ -456,11 +512,13 @@ def compare() -> None:
                      column_config={c: st.column_config.NumberColumn(format="%.2f" if "share" in stat else "%.1f")
                                     for c in shown.columns if c != "Season"})
         proj_rows = world.table[world.table["player_id"].isin(picked)][
-            ["name", "proj_pg", "projection", "slope", "growing", "cur_pg", "blended"]]
+            ["player_id", "name", "status", "proj_pg", "projection", "slope", "growing", "cur_pg", "blended"]]
         st.markdown(f"**{CURRENT_SEASON} outlook**")
-        show_table(proj_rows, ["name", "proj_pg", "projection", "slope", "cur_pg", "blended"],
-                   rename={"proj_pg": "Proj. pts/game", "projection": "Preseason proj.", "slope": "Trend (pts/game/yr)",
-                           "cur_pg": f"{CURRENT_SEASON} pts/game", "blended": "Full-season outlook"})
+        show_table(proj_rows, ["name", "status", "proj_pg", "projection", "slope", "cur_pg", "blended"],
+                   rename={"status": "Injury", "proj_pg": "Proj. pts/game", "projection": "Preseason proj.",
+                           "slope": "Trend (pts/game/yr)", "cur_pg": f"{CURRENT_SEASON} pts/game",
+                           "blended": "Full-season outlook"}, injured=world.injured)
+        injury_legend(world)
 
 
 def teams() -> None:
@@ -558,14 +616,18 @@ def projections() -> None:
     t["flag"] = np.where(t["growing"], "▲ Growing", np.where(t["slope"] < -0.5, "▼ Declining", ""))
     t["range"] = t["low"].round(0).astype(int).astype(str) + "–" + t["high"].round(0).astype(int).astype(str)
     with st.container(border=True, key="card_12"):
-        ev = show_table(t, ["name", "team", "proj_pg", "projection", "range", "slope", "flag",
+        ev = show_table(t, ["name", "team", "status", "proj_pg", "projection", "range", "slope", "flag",
                             "cur_games", "cur_pg", "blended"], height=520, key="proj_table", select=pos != "D/ST",
-                        rename={"proj_pg": "Proj. pts/game", "projection": "Preseason proj.", "range": "Likely range",
+                        injured=world.injured,
+                        rename={"status": "Injury", "proj_pg": "Proj. pts/game", "projection": "Preseason proj.",
+                                "range": "Likely range",
                                 "slope": "Trend", "flag": "Flag", "cur_games": "Games",
                                 "cur_pg": f"{CURRENT_SEASON} pts/game", "blended": "Full-season outlook",
                                 "method": "Method"})
         ui.note("Trend is the change in points per game per season (a regression slope, so it needs 2+ seasons). One-season players are projected at their "
-                "per-game rate x 1.10 over 17 games. Select a row to open the player.")
+                "per-game rate x 1.10 over 17 games. The outlook assumes injured players play every remaining game. "
+                "Select a row to open the player.")
+        injury_legend(world)
         if ev and pos != "D/ST" and ev.selection.rows:
             open_player(t.iloc[ev.selection.rows[0]]["player_id"])
 
@@ -689,7 +751,9 @@ def roster() -> None:
                     html_rows.append(ui.slot_row(slot, None, "", "", bench=slot == "BENCH"))
                     continue
                 pts, sub = points(p)
-                html_rows.append(ui.slot_row(slot, p.name, f"{p.position.replace('DST', 'D/ST')}, {p.team}  |  {sub}",
+                inj = world.injured.get(p.player_id)
+                hurt_now = f"  |  {inj.dot} {inj.text}" if inj is not None else ""
+                html_rows.append(ui.slot_row(slot, p.name, f"{p.position.replace('DST', 'D/ST')}, {p.team}  |  {sub}{hurt_now}",
                                              fmt(pts), bench=slot == "BENCH"))
             total = team.total_projection(lambda p: points(p)[0])
             starters = len(team.starters())
@@ -699,6 +763,12 @@ def roster() -> None:
                       (str(starters), "Starters filled", f"{open_starts} open" if open_starts else "Lineup complete"),
                       (str(len(team.players) - starters), "On the bench", None)])
             st.markdown("".join(html_rows), unsafe_allow_html=True)
+            hurt_starters = [p.name for p in team.starters()
+                             if p.player_id in world.injured and world.injured[p.player_id].likely_out]
+            if hurt_starters:
+                st.warning(f"Injured starter{'s' if len(hurt_starters) > 1 else ''}: {', '.join(hurt_starters)}. "
+                           "Their projection assumes they play; consider moving them to the bench.",
+                           icon=":material/healing:")
             ui.note("Season = points already scored this season + remaining games at a rate that blends the "
                     "projection with this season's pace. Single game = that rate x the opponent's matchup factor "
                     "(points it allows to the position vs league average).")
@@ -708,7 +778,7 @@ def roster() -> None:
                 st.markdown("### Change the lineup")
                 c1, c2, c3, c4 = st.columns([1.6, 1, 0.8, 0.8])
                 who = c1.selectbox("Player", [p.player_id for p in team.players],
-                                   format_func=lambda i: world.players[i].name if i in world.players else i)
+                                   format_func=lambda i: world.players[i].label if i in world.players else i)
                 pl = next(p for p in team.players if p.player_id == who)
                 slots = [s for s in STARTING_SLOTS + ["BENCH"]
                          if s in (pl.position.replace("DST", "D/ST"), "BENCH") or (s == "FLEX" and pl.position in FLEX_ELIGIBLE)]
@@ -736,8 +806,23 @@ EXAMPLES = ["WRs under 25 with 100+ targets last season",
 def search() -> None:
     world = build_world(st.session_state["scoring"])
     ss = st.session_state
-    ui.hero("Ask the data", "Type a question in plain English. The app reads positions, stat rules, ages, seasons "
-            "and teams, then picks a chart for the answer.")
+    ui.hero("Ask the data", "Describe the players you want in a short phrase, like \"WRs under 25 with 100+ targets "
+            "last season\". The search picks out a position, stat rules, an age, seasons and a team, then charts "
+            "every player who matches all of them.")
+    with st.container(border=True, key="card_20"):
+        st.markdown("### How to search")
+        c1, c2, c3 = st.columns(3)
+        c1.markdown("**1. Start with who**  \nA position (`WRs`, `running backs`) or a team (`Lions`, `on KC`). "
+                    "You need at least one of these or a stat rule.")
+        c2.markdown("**2. Add rules with numbers**  \nA number next to a stat name: `100+ targets`, "
+                    "`over 1000 rushing yards`, `points per game over 15`. Every rule must be true.")
+        c3.markdown(f"**3. Say when (optional)**  \n`last season`, `in 2023`, `since 2022`, `this season`. "
+                    f"With no season, the search uses {CURRENT_SEASON - 1}.")
+        ui.note("After you search, the gold tags under the box show how your question was read. If a tag is missing, "
+                "that part wasn't understood: reword it using the stat names below.")
+        with st.expander("Everything the search understands"):
+            st.markdown(SEARCH_HELP)
+
     def use_example():
         if ss.get("example"):
             ss["search_box"] = ss["example"]
@@ -754,9 +839,9 @@ def search() -> None:
         result = q.run(world.seasons, world.scoring)
     except FantasyError as e:
         st.error(str(e))
-        with st.expander("What can I ask?"):
-            st.markdown(SEARCH_HELP)
+        st.info("Check the three steps under How to search above, or start from one of the examples.")
         return
+    st.markdown('<p class="fr-note" style="margin-bottom:.2rem">Your search was read as:</p>', unsafe_allow_html=True)
     ui.chips(q.describe(), kind="gold")
     spec = q.chart_spec(result)
     plot_df = result
@@ -782,23 +867,43 @@ def search() -> None:
         stat_cols = list(dict.fromkeys(c for c, _, _ in q.conditions))
         seasons_col = ["season"] if "first_season" not in result else ["first_season", "season"]
         ev = show_table(result, ["name", "position", "team"] + seasons_col + ["age", "games"] + stat_cols + ["fpts", "fpts_pg"],
-                        height=420, key="search_table", select=True,
+                        height=420, key="search_table", select=True, injured=world.injured,
                         rename={"first_season": "From", "season": "Season" if "first_season" not in result else "To"})
+        ui.note("Sorted by the first stat in your question. Select a row to open that player's page.")
+        injury_legend(world)
         if ev and ev.selection.rows:
             open_player(result.iloc[ev.selection.rows[0]]["player_id"])
-    with st.expander("What can I ask?"):
-        st.markdown(SEARCH_HELP)
 
 
-SEARCH_HELP = """
-- **Positions:** QB, RBs, wide receivers, tight ends
-- **Stat rules:** `100+ targets`, `over 1000 rushing yards`, `passing tds > 30`, `with 10 receiving tds`,
-  `target share above 25%`, `targets per game over 8`, `points per game over 15`
-- **Age:** `under 25`, `older than 29`, `aged 24-26`
-- **Seasons:** `last season`, `this season`, `in 2023`, `since 2022`, `2022-2024`, `last 3 seasons`
-  (no season means last season; several seasons are added together unless you say `by season`)
-- **Teams:** `on KC`, `Chiefs`
-- **Output:** `by season` for one row per season and a line chart, `top 10` to limit the list
+SEARCH_HELP = f"""
+Write the pieces in any order. Words the search doesn't recognise (like "show me" or "who had") are ignored.
+
+| Piece | What to type | Examples |
+|---|---|---|
+| **Position** | QB, RB, WR or TE, singular, plural or spelled out. Name two to include both. | `QBs`, `running backs`, `WRs and TEs` |
+| **Stat rule** | A number and a stat name, joined by `+`, `over`, `under`, `at least`, `at most`, `>` or `<`. Add `per game` for a per-game rate. | `100+ targets`, `over 1000 rushing yards`, `passing tds > 30`, `targets per game over 8`, `target share above 25%` |
+| **Age** | `under`, `older than` or a range, with a two-digit age. | `under 25`, `older than 29`, `aged 24-26` |
+| **Seasons** | One season, a range, or a recent stretch. | `last season`, `this season`, `in 2023`, `2022-2024`, `since 2022`, `last 3 seasons` |
+| **Team** | The nickname, or `on` / `for` plus the abbreviation. | `Lions`, `Chiefs`, `on KC`, `for SF` |
+| **Output** | `by season` for one row per season and a line chart; `top 10` to keep only the first 10. | `by season`, `top 5` |
+
+**Stat names it knows:** targets, receptions (catches), receiving yards, receiving tds, carries (rushes),
+rushing yards, rushing tds, passing yards, passing tds, interceptions, pass attempts, completions,
+total tds, scrimmage yards, fantasy points, points per game (ppg), games, target share, carry share,
+yards per carry (ypc), yards per target, catch rate, opportunities, air yards, fumbles.
+
+**How the rules combine**
+
+- A player has to pass **every** rule. `WRs with 100+ targets under 25` means 100+ targets **and** under 25.
+- With no season, the search uses last season ({CURRENT_SEASON - 1}). `since 2022` and `last 3 seasons` cover
+  completed seasons only; type `this season` for {CURRENT_SEASON} so far.
+- Across several seasons, stats are **added together** and the rule is checked on the total. Add `by season`
+  to check each season on its own instead.
+- Results are sorted by the first stat in your question (fantasy points if there's no stat rule).
+- Your Explore filters in Settings don't apply here; only what you type does.
+
+**It can't** do "either/or" stat rules, rank by a stat you didn't use in a rule, or look up a player by name
+(use the Players page for that, or Compare for named players side by side).
 """
 
 
@@ -812,6 +917,7 @@ PAGES = {
     "projections": st.Page(projections, title="Projections", icon=":material/trending_up:", url_path="projections"),
     "roster": st.Page(roster, title="Roster", icon=":material/groups:", url_path="roster"),
     "search": st.Page(search, title="Search", icon=":material/search:", url_path="search"),
+    "settings": st.Page(settings, title="Settings", icon=":material/settings:", url_path="settings"),
 }
 nav = st.navigation(list(PAGES.values()), position="top")
 try:
@@ -820,5 +926,4 @@ except Exception as exc:  # first run with no network, corrupt cache, ...
     st.error("The NFL data couldn't be loaded. Check your internet connection, then reload the page. "
              f"Details: {exc}")
     st.stop()
-sidebar(_world)
 nav.run()
