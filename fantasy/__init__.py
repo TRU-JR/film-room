@@ -1,6 +1,7 @@
 """NFL fantasy analytics: data, scoring, projections, search, plots and rosters."""
 from .comparison import Comparison
 from .data_loader import DataLoader
+from .injuries import Injury, current_injuries, season_injuries
 from .errors import ComparisonError, FantasyError, PlotError, QueryError, RosterError
 from .player import Player
 from .plots import PlotBuilder
@@ -12,6 +13,6 @@ from .scoring import ScoringFormat
 
 __all__ = [
     "Comparison", "DataLoader", "ComparisonError", "FantasyError", "PlotError", "QueryError",
-    "RosterError", "Player", "PlotBuilder", "StatProcessor", "aggregate_players", "Projector",
+    "RosterError", "Injury", "current_injuries", "season_injuries", "Player", "PlotBuilder", "StatProcessor", "aggregate_players", "Projector",
     "DataQuery", "Roster", "ScoringFormat",
 ]
