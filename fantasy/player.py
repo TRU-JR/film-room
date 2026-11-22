@@ -13,6 +13,7 @@ class Player:
         self.name = name
         self.position = position
         self.team = team
+        self.injury = None  # fantasy.injuries.Injury when the player is hurt right now
         if seasons is None or len(seasons) == 0:
             self.seasons = pd.DataFrame(columns=["season", "games", "fpts", "fpts_pg"])
         else:
@@ -57,7 +58,8 @@ class Player:
 
     @property
     def label(self) -> str:
-        return f"{self.name} ({self.position}, {self.team})"
+        dot = f"{self.injury.dot} " if self.injury is not None else ""
+        return f"{dot}{self.name} ({self.position}, {self.team})"
 
     def __eq__(self, other: object) -> bool:
         return isinstance(other, Player) and other.player_id == self.player_id
