@@ -1,7 +1,8 @@
 """DataLoader: retrieves NFL data from nflverse and caches it locally (R1, R2).
 
 The first run downloads weekly player stats, weekly team stats, the schedule,
-current rosters and player birth dates, trims them to what the app needs and
+current rosters, player birth dates and injury information (weekly injury
+reports plus injured-reserve stints), trims them to what the app needs and
 writes small CSVs into `cache_dir`. Later runs read the CSVs, so the app starts
 in a second or two. `refresh()` re-downloads everything (e.g. after a new week).
 """
@@ -30,6 +31,14 @@ TEAM_STATS = [
     "fumbles_lost_total", "def_sacks", "def_interceptions", "fumble_recovery_opp",
     "def_tds", "def_safeties", "special_teams_tds", "blocked_kicks",
 ]
+
+# Weekly roster status codes that mean a player is out with an injury.
+# R01 injured reserve, R48 injured reserve (designated to return),
+# R04 physically unable to perform (PUP), R05 non-football injury (NFI).
+RESERVE_INJURY_CODES = {"R01": "IR", "R48": "IR", "R04": "PUP", "R05": "NFI"}
+INJURY_REPORT_STATUSES = ["Out", "Doubtful", "Questionable"]
+INJURY_FILE = "injuries.csv"   # optional: the app still runs if it can't be downloaded
+INJURY_COLUMNS = ["player_id", "season", "week", "team", "source", "status", "injury"]
 
 CACHE_FILES = {
     "player_weeks": "player_weeks.csv",
@@ -61,6 +70,7 @@ class DataLoader:
         self.team_stats = pd.DataFrame()   # one row per team per game
         self.schedule = pd.DataFrame()
         self.current_rosters = pd.DataFrame()
+        self.injuries = pd.DataFrame(columns=INJURY_COLUMNS)
 
     # ------------------------------------------------------------------ public
     def load(self) -> None:
@@ -77,6 +87,11 @@ class DataLoader:
         wanted = set(self.seasons) | {self.current_season}
         if not wanted.issubset(cached):
             self.refresh()
+            return
+        if os.path.exists(self._path(INJURY_FILE)):
+            self.injuries = pd.read_csv(self._path(INJURY_FILE))
+        else:
+            self.refresh_injuries()
 
     def refresh(self) -> None:
         """Download fresh data from nflverse and rewrite the cache."""
@@ -103,6 +118,18 @@ class DataLoader:
         self.team_stats.to_csv(self._path(CACHE_FILES["team_games"]), index=False)
         self.schedule.to_csv(self._path(CACHE_FILES["schedule"]), index=False)
         self.current_rosters.to_csv(self._path(CACHE_FILES["current_rosters"]), index=False)
+        self.refresh_injuries()
+
+    def refresh_injuries(self) -> None:
+        """Download injury reports and reserve-list stints. Never fails the app: on a
+        network or format problem the injury table is simply left empty."""
+        try:
+            all_seasons = self.seasons + [self.current_season]
+            self.injuries = pd.concat([self._injury_weeks(y) for y in all_seasons], ignore_index=True)
+            os.makedirs(self.cache_dir, exist_ok=True)
+            self.injuries.to_csv(self._path(INJURY_FILE), index=False)
+        except Exception:  # noqa: BLE001 - injuries are a nice-to-have
+            self.injuries = pd.DataFrame(columns=INJURY_COLUMNS)
 
     def get_active_players(self) -> pd.DataFrame:
         """Skill players on an active 2026 roster, with their current team."""
@@ -161,6 +188,25 @@ class DataLoader:
         team_vol = teams[["game_id", "team", "targets", "carries"]].rename(
             columns={"targets": "team_targets", "carries": "team_carries"})
         return weeks.merge(team_vol, on=["game_id", "team"], how="left")
+
+    def _injury_weeks(self, season: int) -> pd.DataFrame:
+        """One row per skill player per week they were hurt: on the official injury report
+        (Out / Doubtful / Questionable) or on a reserve list (IR, PUP, NFI)."""
+        rep = self._read(f"injuries/injuries_{season}.csv")
+        rep = rep[(rep["game_type"] == "REG") & rep["position"].isin(SKILL_POSITIONS)
+                  & rep["report_status"].isin(INJURY_REPORT_STATUSES)
+                  & ~rep["report_primary_injury"].astype(str).str.contains("not injury related", case=False)]
+        rep = rep.assign(source="report").rename(columns={
+            "gsis_id": "player_id", "report_status": "status", "report_primary_injury": "injury"})
+        ros = self._read(f"weekly_rosters/roster_weekly_{season}.csv")
+        ros = ros[(ros["game_type"] == "REG") & ros["position"].isin(SKILL_POSITIONS)
+                  & ros["status_description_abbr"].isin(RESERVE_INJURY_CODES)]
+        ros = ros.assign(source="reserve", injury=None,
+                         status=ros["status_description_abbr"].map(RESERVE_INJURY_CODES))
+        ros = ros.rename(columns={"gsis_id": "player_id"})
+        out = pd.concat([rep[INJURY_COLUMNS], ros[INJURY_COLUMNS]], ignore_index=True)
+        out["season"] = season
+        return out.dropna(subset=["player_id"]).drop_duplicates().reset_index(drop=True)
 
     def _birth_dates(self) -> pd.DataFrame:
         players = self._read("players/players.csv")
